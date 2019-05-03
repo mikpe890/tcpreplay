@@ -69,6 +69,145 @@ tcpedit_checkdir(tcpedit_t *tcpedit, tcpr_dir_t direction)
     return 0;
 }
 
+uint32_t const BILLION  = 1000000000;
+
+uint32_t const LCM_SHORT_HEADER_MAGIC = 0x4c433032;
+//  0      7 8     15 16    23 24    31
+// +--------+--------+--------+--------+
+// | short_header_magic                |
+// +--------+--------+--------+--------+
+// | sequence_number                   |
+// +--------+--------+--------+--------+
+uint32_t const LCM_FRAGMENTED_HEADER_MAGIC = 0x4c433033;
+// 0      7 8     15 16    23 24    31
+// +--------+--------+--------+--------+
+// | fragment_header_magic             |
+// +--------+--------+--------+--------+
+// | sequence_number                   |
+// +--------+--------+--------+--------+
+// | payload_size                      |
+// +--------+--------+--------+--------+
+// | fragment_offset                   |
+// +--------+--------+--------+--------+
+// | fragment_number | n_fragments     |
+// +--------+--------+--------+--------+
+uint8_t const LCM_HEADER_OFFSET = 0x2a;
+uint8_t const UDP_CHECKSUM_OFFSET = 0x28;
+
+uint8_t const LCM_HEADER_MAGIC_B_SIZE = 0x4;
+uint8_t const LCM_SEQUENCE_NUMBER_B_SIZE = 0x4;
+uint8_t const LCM_FINGERPRINT_B_SIZE = 0x8;
+uint8_t const LCM_PAYLOAD_SIZE_B_SIZE = 0x4;
+uint8_t const LCM_FRAGMENT_OFFSET_B_SIZE = 0x4;
+uint8_t const LCM_FRAGMENT_NUMBER_B_SIZE = 0x2;
+uint8_t const LCM_N_FRAGMENTS_B_SIZE = 0x2;
+
+uint8_t const ZEADER_SEQUENCE_ID_OFFSET = 0x8;
+
+uint64_t get_time_ns(void)
+{
+    long int ns;
+    uint64_t all;
+    time_t sec;
+    struct timespec spec;
+
+    clock_gettime(CLOCK_REALTIME, &spec);
+    sec = spec.tv_sec;
+    ns = spec.tv_nsec;
+
+    return sec * BILLION + ns;
+}
+
+void update_lcm_z_timestamp(u_char *packet, uint8_t offset)
+{
+    uint64_t *z_timestamp_p = (uint64_t*)(packet + offset);
+    uint64_t time_ns = get_time_ns();
+    *z_timestamp_p = htonll(time_ns);
+}
+
+uint8_t calculate_channelname_bsize(u_char *packet, uint8_t channelname_offset)
+{
+    uint8_t channelname_bsize = 0;
+    while ( 0x0 != *(packet + channelname_offset + \
+                        channelname_bsize)) {
+        channelname_bsize++;
+    }
+
+    channelname_bsize++;
+    return channelname_bsize;
+}
+
+bool edit_lcm_timestamps(u_char *packet)
+{
+    bool lcmfound = false;
+
+    uint32_t raw_data = 0x00000000;
+    memcpy(&raw_data, (void*)(packet + LCM_HEADER_OFFSET), sizeof(raw_data));
+    uint32_t data = ntohl(raw_data);
+    if (LCM_SHORT_HEADER_MAGIC == data) {
+        uint8_t channelname_offset = LCM_HEADER_MAGIC_B_SIZE + \
+                                 LCM_HEADER_OFFSET + \
+                                 LCM_SEQUENCE_NUMBER_B_SIZE;
+
+        uint8_t channelname_bsize = calculate_channelname_bsize(packet, channelname_offset);
+        uint8_t z_timestamp_offset = LCM_HEADER_OFFSET + \
+                                    LCM_HEADER_MAGIC_B_SIZE + \
+                                    LCM_SEQUENCE_NUMBER_B_SIZE + \
+                                    channelname_bsize + \
+                                    LCM_FINGERPRINT_B_SIZE + \
+                                    ZEADER_SEQUENCE_ID_OFFSET;
+
+        update_lcm_z_timestamp(packet, z_timestamp_offset);
+
+        // Indicate if LCM packet are updated
+        lcmfound = true;
+    }
+    else if (LCM_FRAGMENTED_HEADER_MAGIC == data) {
+        uint8_t channelname_offset = LCM_HEADER_OFFSET + \
+                                 LCM_HEADER_MAGIC_B_SIZE + \
+                                 LCM_SEQUENCE_NUMBER_B_SIZE + \
+                                 LCM_PAYLOAD_SIZE_B_SIZE + \
+                                 LCM_FRAGMENT_OFFSET_B_SIZE + \
+                                 LCM_FRAGMENT_NUMBER_B_SIZE + \
+                                 LCM_N_FRAGMENTS_B_SIZE;
+
+        uint8_t channelname_bsize = calculate_channelname_bsize(packet, channelname_offset);
+        uint8_t fragmentnumber_offset = LCM_HEADER_OFFSET + \
+                                 LCM_HEADER_MAGIC_B_SIZE + \
+                                 LCM_SEQUENCE_NUMBER_B_SIZE + \
+                                 LCM_PAYLOAD_SIZE_B_SIZE + \
+                                 LCM_FRAGMENT_OFFSET_B_SIZE;
+
+        uint16_t raw_fragmentnumber = 0x0000;
+        memcpy(&raw_fragmentnumber, (void*)(packet + fragmentnumber_offset), sizeof(raw_fragmentnumber));
+        // Only the first fragment includes channel_name
+        // Since the zeader is in the very top of the payload this will also
+        // be in the first fragment.
+        if(ntohs(raw_fragmentnumber) == 0) {
+            uint8_t z_timestamp_offset = fragmentnumber_offset + \
+                                         LCM_FRAGMENT_NUMBER_B_SIZE + \
+                                         LCM_N_FRAGMENTS_B_SIZE + \
+                                         channelname_bsize + \
+                                         LCM_FINGERPRINT_B_SIZE + \
+                                         ZEADER_SEQUENCE_ID_OFFSET;
+
+            update_lcm_z_timestamp(packet, z_timestamp_offset);
+
+            // Indicate if LCM packet are updated
+            lcmfound = true;
+        }
+    }
+
+    // UDP checksum, this field is optional in IPv4, and mandatory in IPv6.
+    // The field carries all-zeros if unused.
+    // Hack to get away without re-calculating UDP checksums.
+    if (lcmfound) {
+        uint16_t *udp_checksum_p = (uint16_t*)(packet + UDP_CHECKSUM_OFFSET);
+        *udp_checksum_p = 0x0000;
+    }
+
+    return  lcmfound;
+}
 
 /**
  * \brief Edit the given packet
@@ -335,6 +474,11 @@ tcpedit_packet(tcpedit_t *tcpedit, struct pcap_pkthdr **pkthdr,
                     return TCPEDIT_ERROR;
             }
         }
+    }
+
+    if (edit_lcm_timestamps(packet)) {
+        // Make sure TCP checksums are fixed
+        needtorecalc++;
     }
 
     /*

@@ -171,7 +171,6 @@ bool edit_lcm_timestamps(u_char *packet)
                                  LCM_FRAGMENT_NUMBER_B_SIZE + \
                                  LCM_N_FRAGMENTS_B_SIZE;
 
-        uint8_t channelname_bsize = calculate_channelname_bsize(packet, channelname_offset);
         uint8_t fragmentnumber_offset = LCM_HEADER_OFFSET + \
                                  LCM_HEADER_MAGIC_B_SIZE + \
                                  LCM_SEQUENCE_NUMBER_B_SIZE + \
@@ -184,6 +183,7 @@ bool edit_lcm_timestamps(u_char *packet)
         // Since the zeader is in the very top of the payload this will also
         // be in the first fragment.
         if(ntohs(raw_fragmentnumber) == 0) {
+            uint8_t channelname_bsize = calculate_channelname_bsize(packet, channelname_offset);
             uint8_t z_timestamp_offset = fragmentnumber_offset + \
                                          LCM_FRAGMENT_NUMBER_B_SIZE + \
                                          LCM_N_FRAGMENTS_B_SIZE + \
